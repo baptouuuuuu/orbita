@@ -55,6 +55,7 @@ input[type="color"] { padding: .25rem; width: 3.5rem; }
 textarea { min-height: 5rem; min-width: 15rem; }
 button { cursor: pointer; border: 1px solid #4d68d8; color: white; background: #4d68d8; padding: .7rem 1rem; min-height: 44px; font-size: .83rem; font-weight: 700; transition: background-color .18s ease, border-color .18s ease, box-shadow .18s ease; }
 button:hover { background: #3d56c4; border-color: #3d56c4; }
+button:disabled { cursor: not-allowed; opacity: .6; }
 button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 3px solid #e6a438; outline-offset: 2px; }
 button.secondary { background: #fff; color: #465e99; border-color: #dbe3f0; }
 button.secondary:hover { background: #f0f4fc; border-color: #bdcbe5; }
@@ -87,6 +88,22 @@ button.compact { padding: .45rem .7rem; font-size: .76rem; }
 .scenario > details { border-top: 1px solid #e6ebf4; padding: 1rem 0; }
 .scenario summary { cursor: pointer; color: #263b78; font-weight: 700; }
 .scenario details p { margin: .7rem 0; }
+.mission-progress { margin: 1.2rem 0; }
+.mission-progress-label { display: flex; justify-content: space-between; color: #526179; font-size: .8rem; }
+.mission-progress progress { display: block; width: 100%; height: .6rem; margin-top: .5rem; accent-color: #4d68d8; }
+.sensor-console { margin-top: 1.5rem; padding: 1.3rem; background: #f5f8fd; border: 1px solid #dfe8f5; border-radius: .85rem; }
+.sensor-console > p { font-size: .85rem; }
+.sensor-count { color: #53689a; font-size: .8rem; font-weight: 700; white-space: nowrap; }
+.sensor-group { border-top: 1px solid #dfe8f5; padding: 1rem 0; }
+.sensor-group summary { display: flex; justify-content: space-between; gap: 1rem; }
+.sensor-group summary span { color: #718096; font-size: .8rem; }
+.sensor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: .75rem; margin-top: 1rem; }
+.sensor-card { background: #fff; border: 1px solid #e0e8f3; border-radius: .75rem; padding: 1rem; }
+.sensor-card.is-next { border-color: #8096ef; box-shadow: 0 0 0 2px #e2e8ff; }
+.sensor-card-heading { display: flex; justify-content: space-between; gap: .5rem; font-size: .86rem; }
+.sensor-card-heading span { color: #405ac5; font-size: .68rem; white-space: nowrap; }
+.scenario .sensor-card p { margin: .5rem 0; font-size: .8rem; }
+.scenario .sensor-card .sensor-source { color: #8591a4; font-size: .7rem; }
 .scenario-catalog summary { cursor: pointer; color: #263b78; font-weight: 700; }
 .scenario-preview { padding-left: 1.4rem; color: #526179; line-height: 1.6; }
 .scenario-preview > li { margin: .6rem 0; }

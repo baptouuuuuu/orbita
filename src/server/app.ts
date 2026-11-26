@@ -9,7 +9,7 @@ import { z, ZodError } from 'zod';
 import type { WebSocket } from 'ws';
 import { openDatabase, transaction } from './db.js';
 import { stationMessage, type StationAdapter, type StationMessage } from '../shared/protocol.js';
-import { scenarios, newProgress, performScenarioAction, scenarioSummary, scenarioView, ScenarioActionError, type ScenarioDefinition, type ScenarioProgress } from '../shared/scenarios.js';
+import { scenarios, newProgress, performScenarioAction, receiveScenarioSensor, scenarioSummary, scenarioView, ScenarioActionError, type ScenarioDefinition, type ScenarioProgress } from '../shared/scenarios.js';
 
 type Role = 'admin' | 'gm';
 type SessionRow = { id: string; status: 'ready' | 'running' | 'paused' | 'finished'; elapsed_ms: number; started_at: string | null; configuration_snapshot: string; configuration_id: string };
@@ -266,6 +266,25 @@ export async function buildApp(options: AppOptions) {
       addEvent(id, result.correct ? 'scenario_action_completed' : 'scenario_answer_incorrect', actor(request)!, result.title);
     });
     notify(); return { correct: result.correct };
+  });
+  app.post('/api/sessions/:id/scenario/sensors/:sensorId/:source', async request => {
+    const { id, sensorId, source } = z.object({ id: uuid, sensorId: z.string().min(1).max(100), source: z.enum(['simulate', 'messages']) }).strict().parse(request.params);
+    const { value } = z.object({ value: z.string().min(1).max(100) }).strict().parse(request.body);
+    if (mutable(id).status !== 'running') throw new HttpError(409, 'La session doit être en cours');
+    const row = db.prepare('SELECT definition, progress FROM session_scenarios WHERE session_id = ?').get(id);
+    if (!row) throw new HttpError(404, 'Aucun scénario pour cette session');
+    const definition = JSON.parse(String(row.definition)) as ScenarioDefinition;
+    const progress = JSON.parse(String(row.progress)) as ScenarioProgress;
+    const sourceActor = source === 'simulate' ? `simulateur (${actor(request)!})` : actor(request)!;
+    let result: ReturnType<typeof receiveScenarioSensor>;
+    try { result = receiveScenarioSensor(definition, progress, sensorId, value, sourceActor, now()); }
+    catch (error) { if (error instanceof ScenarioActionError) throw new HttpError(409, error.message); throw error; }
+    transaction(db, () => {
+      db.prepare('UPDATE session_scenarios SET progress = ? WHERE session_id = ?').run(JSON.stringify(progress), id);
+      addEvent(id, 'scenario_sensor', sourceActor, `${result.sensorName} : ${result.valueLabel}`);
+      if (result.completed) addEvent(id, 'scenario_action_completed', sourceActor, result.title!);
+    });
+    notify(); return { completed: result.completed };
   });
   app.post('/api/sessions/:id/transition', async request => {
     const { id } = idParams.parse(request.params);

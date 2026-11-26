@@ -4,10 +4,12 @@ export type ScenarioAction = {
   instruction: string;
   hint: string;
   answer?: string;
+  sensor?: { id: string; value: string };
 };
 export type ScenarioStage = { id: string; title: string; duration: string; briefing: string; actions: ScenarioAction[] };
-export type ScenarioDefinition = { id: string; version: number; title: string; summary: string; stages: ScenarioStage[] };
-export type ScenarioProgress = { completed: { actionId: string; at: string; actor: string }[]; attempts: Record<string, number> };
+export type ScenarioSensor = { id: string; name: string; values: { value: string; label: string }[] };
+export type ScenarioDefinition = { id: string; version: number; title: string; summary: string; stages: ScenarioStage[]; sensors?: ScenarioSensor[] };
+export type ScenarioProgress = { completed: { actionId: string; at: string; actor: string }[]; attempts: Record<string, number>; sensors?: Record<string, { value: string; at: string; actor: string }> };
 export class ScenarioActionError extends Error {}
 
 // Definitions are copied into each session: edits to the catalog never alter an existing game.
@@ -53,6 +55,59 @@ export const scenarios: ScenarioDefinition[] = [{
   ],
 }];
 
+const lunarSimulationStages = [
+  { id: 'installation', title: '1. Installer la base', briefing: 'Préparez les équipements et raccordez les modules dans l’ordre.', steps: [
+    ['inventory', 'Inventaire du matériel', 'Bouton de contrôle', 'À contrôler', 'Contrôlé'],
+    ['solar-cable', 'Relier les panneaux au régulateur', 'Branchement panneaux → régulateur', 'Débranché', 'Branché'],
+    ['console-cable', 'Relier le régulateur au pupitre', 'Branchement régulateur → pupitre', 'Débranché', 'Branché'],
+  ] },
+  { id: 'energy', title: '2. Alimenter la base', briefing: 'Orientez les panneaux et sécurisez la réserve avant la mise sous tension.', steps: [
+    ['solar-position', 'Orienter les panneaux à 60°', 'Position des panneaux', 'Hors position', '60°'],
+    ['reserve', 'Vérifier la réserve positive', 'Capteur de réserve', 'Insuffisante', 'Positive'],
+    ['power', 'Mettre le régulateur sous tension', 'Interrupteur du régulateur', 'Arrêt', 'Marche'],
+  ] },
+  { id: 'startup', title: '3. Démarrer la base', briefing: 'Démarrez successivement la console puis la radio et vérifiez le diagnostic.', steps: [
+    ['console', 'Allumer le pupitre', 'Interrupteur du pupitre', 'Arrêt', 'Marche'],
+    ['radio', 'Allumer la radio', 'Interrupteur de la radio', 'Arrêt', 'Marche'],
+    ['diagnostic', 'Confirmer le diagnostic', 'Bouton de diagnostic', 'Non confirmé', 'Confirmé'],
+  ] },
+  { id: 'lunar-link', title: '4. Pointer le relais lunaire', briefing: 'Réglez la monture avant de chercher le signal lunaire.', steps: [
+    ['azimuth', 'Régler l’azimut à 125°', 'Capteur d’azimut lunaire', 'Hors position', '125°'],
+    ['elevation', 'Régler l’élévation à 32°', 'Capteur d’élévation lunaire', 'Hors position', '32°'],
+    ['lunar-signal', 'Acquérir le signal lunaire', 'Détecteur du relais lunaire', 'Absent', 'Acquis'],
+  ] },
+  { id: 'earth-link', title: '5. Établir le relais terrestre', briefing: 'Choisissez la cible libre et orientez le relais vers la Terre.', steps: [
+    ['target', 'Sélectionner la cible B', 'Sélecteur de cible', 'Autre cible', 'Cible B'],
+    ['relay-angle', 'Tourner le relais de 60°', 'Capteur de rotation du relais', 'Hors position', '60°'],
+    ['earth-signal', 'Verrouiller la liaison terrestre', 'Détecteur de liaison terrestre', 'Absent', 'Verrouillé'],
+  ] },
+  { id: 'transmission', title: '6. Transmettre le message', briefing: 'Réglez le canal, chargez le message puis déclenchez l’émission.', steps: [
+    ['channel', 'Régler le canal 13', 'Sélecteur de canal', 'Autre canal', 'Canal 13'],
+    ['message', 'Charger le message chiffré', 'Chargeur de message', 'Vide', 'Message chargé'],
+    ['transmit', 'Déclencher l’émission', 'Bouton d’émission', 'Relâché', 'Appuyé'],
+  ] },
+  { id: 'reception', title: '7. Recevoir la réponse', briefing: 'Vérifiez la réception et l’intégrité avant de clore la mission.', steps: [
+    ['received', 'Recevoir la réponse terrestre', 'Détecteur de réception', 'Aucune réponse', 'Réponse reçue'],
+    ['integrity', 'Contrôler l’intégrité', 'Contrôle d’intégrité', 'Non vérifié', 'Valide'],
+    ['report', 'Valider le rapport final', 'Bouton de rapport', 'Non validé', 'Validé'],
+  ] },
+];
+
+scenarios.push({
+  id: 'lunar-simulation', version: 1, title: 'Lunar Relay — simulation instrumentée',
+  summary: 'Rétablissez la liaison lunaire en suivant une séquence de branchements, réglages et interactions contrôlés par des capteurs.',
+  sensors: lunarSimulationStages.flatMap(stage => stage.steps.map(([id, , name, inactive, active]) => ({
+    id, name, values: [{ value: 'inactive', label: inactive }, { value: 'active', label: active }],
+  }))),
+  stages: lunarSimulationStages.map((stage, index) => ({
+    id: stage.id, title: stage.title, duration: ['5–8 min', '5–8 min', '5–7 min', '6–9 min', '6–9 min', '6–10 min', '5–8 min'][index], briefing: stage.briefing,
+    actions: stage.steps.map(([id, title, name, , active]) => ({
+      id, title, instruction: `${name} : ${active}.`, hint: 'Effectuez cette interaction après la précédente.',
+      sensor: { id, value: 'active' },
+    })),
+  })),
+});
+
 export function newProgress(): ScenarioProgress { return { completed: [], attempts: {} }; }
 
 export function scenarioSummary(definition: ScenarioDefinition) {
@@ -76,7 +131,8 @@ export function scenarioView(definition: ScenarioDefinition, progress: ScenarioP
     });
     return { ...stage, actions };
   });
-  return { id: definition.id, version: definition.version, title: definition.title, summary: definition.summary, stages, completed: progress.completed.length, total, result: progress.completed.length === total ? 'completed' : sessionStatus === 'finished' ? 'incomplete' : 'in_progress' };
+  const sensors = (definition.sensors ?? []).map(sensor => ({ ...sensor, state: progress.sensors?.[sensor.id] ?? null }));
+  return { id: definition.id, version: definition.version, title: definition.title, summary: definition.summary, stages, sensors, completed: progress.completed.length, total, result: progress.completed.length === total ? 'completed' : sessionStatus === 'finished' ? 'incomplete' : 'in_progress' };
 }
 export type ScenarioView = ReturnType<typeof scenarioView>;
 
@@ -85,10 +141,24 @@ export function performScenarioAction(definition: ScenarioDefinition, progress: 
   const action = actions.find(item => item.id === actionId);
   if (!action) throw new ScenarioActionError('Action introuvable');
   if (actions.find(item => !progress.completed.some(entry => entry.actionId === item.id))?.id !== actionId) throw new ScenarioActionError('Action non disponible');
+  if (action.sensor) throw new ScenarioActionError('Cette action nécessite un événement de capteur');
   if (action.answer !== undefined && !answer?.trim()) throw new ScenarioActionError('Réponse requise');
   if (action.answer === undefined && answer !== undefined) throw new ScenarioActionError('Cette action ne demande pas de réponse');
   const correct = action.answer === undefined || answer!.trim().toLocaleUpperCase('fr-FR') === action.answer.toLocaleUpperCase('fr-FR');
   if (correct) progress.completed.push({ actionId, at, actor });
   else progress.attempts[actionId] = (progress.attempts[actionId] ?? 0) + 1;
   return { correct, title: action.title };
+}
+
+export function receiveScenarioSensor(definition: ScenarioDefinition, progress: ScenarioProgress, sensorId: string, value: string, actor: string, at: string) {
+  const sensor = definition.sensors?.find(item => item.id === sensorId);
+  if (!sensor) throw new ScenarioActionError('Capteur introuvable');
+  if (!sensor.values.some(option => option.value === value)) throw new ScenarioActionError('État de capteur invalide');
+  const previous = progress.sensors?.[sensorId]?.value;
+  progress.sensors ??= {};
+  progress.sensors[sensorId] = { value, at, actor };
+  const next = definition.stages.flatMap(stage => stage.actions).find(action => !progress.completed.some(entry => entry.actionId === action.id));
+  const completed = previous !== value && next?.sensor?.id === sensorId && next.sensor.value === value;
+  if (completed) progress.completed.push({ actionId: next.id, at, actor });
+  return { completed: !!completed, title: next?.title, sensorName: sensor.name, valueLabel: sensor.values.find(option => option.value === value)!.label };
 }
