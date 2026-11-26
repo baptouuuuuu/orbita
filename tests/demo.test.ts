@@ -18,6 +18,28 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('démonstration autonome', () => {
+  it('suit les actions du scénario et remet sa progression à zéro', () => {
+    call('/api/login', 'POST', { role: 'gm', password: '' });
+    const config = call<{ id: string }[]>('/api/configurations')[0];
+    const catalog = call<{ id: string; stages: { title: string; actions: { title: string }[] }[] }[]>('/api/scenarios');
+    expect(catalog[0].id).toBe('lunar-relay');
+    expect(catalog[0].stages).toHaveLength(7);
+    expect(catalog[0].stages[0].actions[0].title).toBe('Inventorier et installer');
+    expect(JSON.stringify(catalog)).not.toContain('"answer"');
+    const sessionId = call<{ id: string }>('/api/sessions', 'POST', { configurationId: config.id, scenarioId: 'lunar-relay' }).id;
+    const action = (id: string, body = {}) => call<{ correct: boolean }>(`/api/sessions/${sessionId}/scenario/actions/${id}`, 'POST', body);
+    expect(() => action('inventory')).toThrow('en cours');
+    call(`/api/sessions/${sessionId}/transition`, 'POST', { action: 'start' });
+    expect(() => action('cabling')).toThrow('non disponible');
+    action('inventory'); action('cabling');
+    expect(action('safety', { answer: '8' }).correct).toBe(false);
+    const detail = call<{ scenario: { completed: number; stages: { actions: { attempts: number }[] }[] } }>(`/api/sessions/${sessionId}`);
+    expect(detail.scenario.completed).toBe(2);
+    expect(detail.scenario.stages[0].actions[2].attempts).toBe(1);
+    const next = call<{ id: string }>(`/api/sessions/${sessionId}/reset`, 'POST', {}).id;
+    expect(call<{ scenario: { completed: number } }>(`/api/sessions/${next}`).scenario.completed).toBe(0);
+  });
+
   it('simule une partie et conserve son historique dans le navigateur', () => {
     call('/api/login', 'POST', { role: 'gm', password: '' });
     expect(() => call('/api/admin/configurations', 'POST', {})).toThrow('administrateur');

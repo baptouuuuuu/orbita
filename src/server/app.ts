@@ -9,6 +9,7 @@ import { z, ZodError } from 'zod';
 import type { WebSocket } from 'ws';
 import { openDatabase, transaction } from './db.js';
 import { stationMessage, type StationAdapter, type StationMessage } from '../shared/protocol.js';
+import { scenarios, newProgress, performScenarioAction, scenarioSummary, scenarioView, ScenarioActionError, type ScenarioDefinition, type ScenarioProgress } from '../shared/scenarios.js';
 
 type Role = 'admin' | 'gm';
 type SessionRow = { id: string; status: 'ready' | 'running' | 'paused' | 'finished'; elapsed_ms: number; started_at: string | null; configuration_snapshot: string; configuration_id: string };
@@ -108,17 +109,18 @@ export async function buildApp(options: AppOptions) {
       ...row,
       effective_status: row.status !== 'offline' && (!row.last_seen || Date.now() - Date.parse(String(row.last_seen)) > options.silentSeconds * 1000) ? 'offline' : row.status,
     }));
+    const scenario = db.prepare('SELECT definition, progress FROM session_scenarios WHERE session_id = ?').get(id);
     return {
       ...session, configuration: snapshot, elapsed_ms: elapsed,
       remaining_ms: Math.max(0, snapshot.duration_seconds * 1000 - elapsed),
+      scenario: scenario ? scenarioView(JSON.parse(String(scenario.definition)) as ScenarioDefinition, JSON.parse(String(scenario.progress)) as ScenarioProgress, session.status) : null,
       teams, stations,
       events: db.prepare('SELECT * FROM session_events WHERE session_id = ? ORDER BY rowid DESC LIMIT 200').all(id),
       scores: db.prepare(`SELECT s.*, t.name AS team_name, EXISTS(SELECT 1 FROM score_events c WHERE c.compensates = s.id) AS compensated
         FROM score_events s JOIN teams t ON t.id = s.team_id WHERE s.session_id = ? ORDER BY s.rowid DESC`).all(id),
     };
   };
-  const simulator: StationAdapter = {
-    receive(stationId: string, message: StationMessage) {
+  const receiveStation = (stationId: string, message: StationMessage, source: string) => {
       const station = getStation(stationId);
       mutable(station.session_id);
       const parsed = stationMessage.parse(message);
@@ -126,10 +128,12 @@ export async function buildApp(options: AppOptions) {
       transaction(db, () => {
         db.prepare('UPDATE stations SET status = ?, last_seen = ?, last_message = ? WHERE id = ?')
           .run(parsed.type === 'status' ? parsed.status : station.status, now(), parsed.message ?? null, stationId);
-        addEvent(station.session_id, parsed.type === 'status' ? `station_${parsed.status}` : 'station_event', 'simulateur', `${stationId} : ${parsed.message ?? (parsed.type === 'status' ? parsed.status : '')}`);
+        addEvent(station.session_id, parsed.type === 'status' ? `station_${parsed.status}` : 'station_event', source, `${stationId} : ${parsed.message ?? (parsed.type === 'status' ? parsed.status : '')}`);
       });
       notify();
-    },
+  };
+  const simulator: StationAdapter = {
+    receive(stationId: string, message: StationMessage) { receiveStation(stationId, message, 'simulateur'); },
     command(stationId, command) {
       getStation(stationId);
       if (command.version !== 1 || command.type !== 'ping') throw new HttpError(400, 'Commande invalide');
@@ -195,6 +199,7 @@ export async function buildApp(options: AppOptions) {
   app.get('/api/configurations', async () => db.prepare('SELECT * FROM configurations ORDER BY created_at DESC').all().map(row => ({
     ...row, stations: db.prepare('SELECT * FROM configuration_stations WHERE configuration_id = ? ORDER BY name').all(String(row.id)),
   })));
+  app.get('/api/scenarios', async () => scenarios.map(scenarioSummary));
   app.post('/api/admin/configurations', async request => {
     const input = configInput.parse(request.body);
     const id = randomUUID();
@@ -223,13 +228,16 @@ export async function buildApp(options: AppOptions) {
   });
   app.get('/api/sessions', async () => db.prepare('SELECT id, status, created_at, finished_at, configuration_snapshot FROM sessions ORDER BY created_at DESC').all());
   app.post('/api/sessions', async request => {
-    const { configurationId } = z.object({ configurationId: uuid }).strict().parse(request.body);
+    const { configurationId, scenarioId } = z.object({ configurationId: uuid, scenarioId: z.string().min(1).max(100).optional() }).strict().parse(request.body);
     const config = getConfig(configurationId);
     if (config.archived) throw new HttpError(409, 'Configuration archivée');
+    const scenario = scenarioId ? scenarios.find(item => item.id === scenarioId) : undefined;
+    if (scenarioId && !scenario) throw new HttpError(404, 'Scénario introuvable');
     const stations = db.prepare('SELECT * FROM configuration_stations WHERE configuration_id = ?').all(configurationId);
     const id = randomUUID();
     transaction(db, () => {
       db.prepare('INSERT INTO sessions (id, configuration_id, configuration_snapshot, status, created_at) VALUES (?, ?, ?, ?, ?)').run(id, configurationId, JSON.stringify({ ...config, stations }), 'ready', now());
+      if (scenario) db.prepare('INSERT INTO session_scenarios VALUES (?, ?, ?)').run(id, JSON.stringify(scenario), JSON.stringify(newProgress()));
       for (const station of stations) db.prepare('INSERT INTO stations (id, session_id, name, status) VALUES (?, ?, ?, ?)').run(randomUUID(), id, String(station.name), 'offline');
       addEvent(id, 'session_created', actor(request)!, 'Session créée');
     });
@@ -241,6 +249,23 @@ export async function buildApp(options: AppOptions) {
     const detail = sessionDetail(id);
     const events = db.prepare('SELECT * FROM session_events WHERE session_id = ? ORDER BY rowid').all(id);
     return reply.header('Content-Disposition', `attachment; filename="orbita-${id}.json"`).send({ ...detail, events });
+  });
+  app.post('/api/sessions/:id/scenario/actions/:actionId', async request => {
+    const { id, actionId } = z.object({ id: uuid, actionId: z.string().min(1).max(100) }).strict().parse(request.params);
+    const { answer } = z.object({ answer: z.string().max(100).optional() }).strict().parse(request.body);
+    if (mutable(id).status !== 'running') throw new HttpError(409, 'La session doit être en cours');
+    const row = db.prepare('SELECT definition, progress FROM session_scenarios WHERE session_id = ?').get(id);
+    if (!row) throw new HttpError(404, 'Aucun scénario pour cette session');
+    const definition = JSON.parse(String(row.definition)) as ScenarioDefinition;
+    const progress = JSON.parse(String(row.progress)) as ScenarioProgress;
+    let result: ReturnType<typeof performScenarioAction>;
+    try { result = performScenarioAction(definition, progress, actionId, answer, actor(request)!, now()); }
+    catch (error) { if (error instanceof ScenarioActionError) throw new HttpError(409, error.message); throw error; }
+    transaction(db, () => {
+      db.prepare('UPDATE session_scenarios SET progress = ? WHERE session_id = ?').run(JSON.stringify(progress), id);
+      addEvent(id, result.correct ? 'scenario_action_completed' : 'scenario_answer_incorrect', actor(request)!, result.title);
+    });
+    notify(); return { correct: result.correct };
   });
   app.post('/api/sessions/:id/transition', async request => {
     const { id } = idParams.parse(request.params);
@@ -263,6 +288,7 @@ export async function buildApp(options: AppOptions) {
       db.prepare("UPDATE sessions SET status = 'finished', elapsed_ms = ?, started_at = NULL, finished_at = ? WHERE id = ?").run(elapsed, now(), id);
       addEvent(id, 'session_reset', actor(request)!, 'Session clôturée par réinitialisation');
       db.prepare('INSERT INTO sessions (id, configuration_id, configuration_snapshot, status, created_at) VALUES (?, ?, ?, ?, ?)').run(newId, session.configuration_id, session.configuration_snapshot, 'ready', now());
+      db.prepare('INSERT INTO session_scenarios SELECT ?, definition, ? FROM session_scenarios WHERE session_id = ?').run(newId, JSON.stringify(newProgress()), id);
       for (const t of db.prepare('SELECT * FROM teams WHERE session_id = ? AND active = 1').all(id)) db.prepare('INSERT INTO teams (id, session_id, name, color) VALUES (?, ?, ?, ?)').run(randomUUID(), newId, String(t.name), String(t.color));
       for (const s of db.prepare('SELECT * FROM stations WHERE session_id = ?').all(id)) db.prepare("INSERT INTO stations (id, session_id, name, status) VALUES (?, ?, ?, 'offline')").run(randomUUID(), newId, String(s.name));
       addEvent(newId, 'session_created', actor(request)!, 'Session créée par réinitialisation');
@@ -317,6 +343,11 @@ export async function buildApp(options: AppOptions) {
   app.post('/api/stations/:id/simulate', async request => {
     const { id } = idParams.parse(request.params); const message = stationMessage.parse(request.body);
     simulator.receive(id, message); return { ok: true };
+  });
+  app.post('/api/stations/:id/messages', async request => {
+    const { id } = idParams.parse(request.params);
+    receiveStation(id, stationMessage.parse(request.body), actor(request)!);
+    return { ok: true };
   });
   app.get('/api/admin/health', async () => ({
     backend: 'ok', startedAt, database: db.prepare('SELECT 1 AS ok').get() ? 'ok' : 'error', silentSeconds: options.silentSeconds,
