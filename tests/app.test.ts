@@ -28,6 +28,47 @@ afterEach(async () => {
 });
 
 describe('pilotage local', () => {
+  it('valide les capteurs dans l’ordre, conserve leur état et réinitialise la simulation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orbita-sensors-')); dirs.push(dir);
+    const path = join(dir, 'test.sqlite');
+    let app = await setup(path);
+    const admin = await login(app, 'admin'); let gm = await login(app, 'gm');
+    const config = (await call(app, admin, 'POST', '/api/admin/configurations', { name: 'Lune', durationSeconds: 3600, allowTeamChanges: true, stations: [] })).json().id;
+    const id = (await call(app, gm, 'POST', '/api/sessions', { configurationId: config, scenarioId: 'lunar-simulation' })).json().id;
+    const sensor = (sensorId: string, value: string, source = 'simulate') => call(app, gm, 'POST', `/api/sessions/${id}/scenario/sensors/${sensorId}/${source}`, { value });
+    expect((await sensor('inventory', 'active')).statusCode).toBe(409);
+    await call(app, gm, 'POST', `/api/sessions/${id}/transition`, { action: 'start' });
+    expect((await sensor('unknown', 'active')).statusCode).toBe(409);
+    expect((await sensor('inventory', 'invalid')).statusCode).toBe(409);
+    expect((await call(app, gm, 'POST', `/api/sessions/${id}/scenario/actions/inventory`, {})).statusCode).toBe(409);
+    expect((await sensor('solar-cable', 'active')).json().completed).toBe(false);
+    expect((await sensor('inventory', 'active', 'messages')).json().completed).toBe(true);
+    expect((await sensor('solar-cable', 'active')).json().completed).toBe(false);
+    await app.close(); apps.splice(apps.indexOf(app), 1);
+    app = await setup(path); gm = await login(app, 'gm');
+    let detail = (await call(app, gm, 'GET', `/api/sessions/${id}`)).json();
+    expect(detail.scenario.completed).toBe(1);
+    expect(detail.scenario.sensors.find((item: { id: string }) => item.id === 'solar-cable').state.value).toBe('active');
+    await call(app, gm, 'POST', `/api/sessions/${id}/transition`, { action: 'pause' });
+    expect((await sensor('solar-cable', 'inactive')).statusCode).toBe(409);
+    await call(app, gm, 'POST', `/api/sessions/${id}/transition`, { action: 'resume' });
+    expect((await sensor('solar-cable', 'inactive')).json().completed).toBe(false);
+    expect((await sensor('solar-cable', 'active')).json().completed).toBe(true);
+    for (const sensorId of ['console-cable', 'solar-position', 'reserve', 'power', 'console', 'radio', 'diagnostic', 'azimuth', 'elevation', 'lunar-signal', 'target', 'relay-angle', 'earth-signal', 'channel', 'message', 'transmit', 'received', 'integrity', 'report']) {
+      expect((await sensor(sensorId, 'active')).json()).toEqual({ completed: true });
+    }
+    detail = (await call(app, gm, 'GET', `/api/sessions/${id}/export`)).json();
+    expect(detail.scenario.result).toBe('completed');
+    expect(detail.scenario.completed).toBe(21);
+    expect(detail.scenario.sensors).toHaveLength(21);
+    expect(detail.events.some((event: { type: string; actor: string }) => event.type === 'scenario_sensor' && event.actor === 'gm')).toBe(true);
+    const next = (await call(app, gm, 'POST', `/api/sessions/${id}/reset`, {})).json().id;
+    detail = (await call(app, gm, 'GET', `/api/sessions/${next}`)).json();
+    expect(detail.scenario.completed).toBe(0);
+    expect(detail.scenario.sensors.every((item: { state: unknown }) => item.state === null)).toBe(true);
+    expect((await call(app, gm, 'GET', `/api/sessions/${id}`)).json().scenario.completed).toBe(21);
+  });
+
   it('joue et conserve une mission complète, ses erreurs et sa réinitialisation', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'orbita-scenario-')); dirs.push(dir);
     const path = join(dir, 'test.sqlite');

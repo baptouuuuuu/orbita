@@ -25,13 +25,17 @@ Toutes les réponses d'erreur ont la forme `{"error":"..."}`. Identifiants : UUI
 | POST | `/api/scores/:id/compensate` | connecté | `{"reason":"..."}` ; une seule compensation par événement |
 | POST | `/api/sessions/:id/events` | connecté | `{"type":"hint" ou "intervention","message":"..."}` |
 | POST | `/api/sessions/:id/scenario/actions/:actionId` | connecté | `{}` pour confirmer une manipulation, ou `{"answer":"..."}` pour une réponse ; retourne `{"correct":true ou false}` |
+| POST | `/api/sessions/:id/scenario/sensors/:sensorId/simulate` | connecté | `{"value":"active"}` : simule l'état d'un capteur |
+| POST | `/api/sessions/:id/scenario/sensors/:sensorId/messages` | connecté | `{"value":"active"}` : état transmis par une intégration de confiance |
 | POST | `/api/stations/:id/simulate` | connecté | Message de poste versionné ci-dessous |
 | POST | `/api/stations/:id/messages` | connecté | Réception d'un message d'équipement selon le protocole ci-dessous |
 | GET | `/api/admin/health` | admin | Démarrage, base et 100 événements récents |
 
 `GET /ws` est un WebSocket authentifié avec origine contrôlée. Le serveur envoie `{"type":"changed"}` après mutation ; le client recharge les données autorisées. Les messages entrants sont refusés. La fermeture de session révoque aussi les connexions WebSocket.
 
-Le détail et l'export contiennent `scenario` (ou `null`), avec les étapes, actions, tentatives incorrectes, dates et acteurs des validations, et le résultat `in_progress`, `completed` ou `incomplete`. Les solutions ne sont pas incluses dans cette vue. Les actions sont séquentielles et ne peuvent être validées que pendant une session en cours ; une réponse incorrecte est enregistrée sans débloquer la suite. Les actions et erreurs sont journalisées sans enregistrer le contenu de la réponse. Les définitions et la progression sont conservées par session ; une réinitialisation reprend la définition figée avec une progression vierge. Ces actions sont validées manuellement et ne pilotent pas les postes.
+Le détail et l'export contiennent `scenario` (ou `null`), avec les étapes, actions, tentatives incorrectes, dates et acteurs des validations, et le résultat `in_progress`, `completed` ou `incomplete`. Les réponses aux énigmes ne sont pas incluses dans cette vue. Les actions sont séquentielles et ne peuvent être validées que pendant une session en cours ; une réponse incorrecte est enregistrée sans débloquer la suite. Les actions et erreurs sont journalisées sans enregistrer le contenu de la réponse. Les définitions et la progression sont conservées par session ; une réinitialisation reprend la définition figée avec une progression vierge. Ces actions ne pilotent pas les postes.
+
+Pour une mission instrumentée, `scenario.sensors` décrit chaque capteur, ses valeurs possibles et son dernier état (`null` si inconnu, sinon valeur, date et acteur). Les deux routes de capteur renvoient `{"completed":true ou false}`. Elles enregistrent l'état et ne valident l'action courante que si la valeur reçue correspond à celle attendue **et diffère de l'état précédent**. Un événement reçu en avance ou répété ne valide donc pas une action ultérieure ; il faut changer l'état puis le transmettre à nouveau au moment attendu. Les capteurs inconnus ou valeurs non déclarées sont refusés ; aucune mise à jour n'est acceptée en dehors d'une session en cours. Les états et validations sont journalisés, avec distinction du simulateur et du rôle émetteur. La progression est commune à la session. Ces routes exigent le même cookie et la même origine que les autres mutations ; aucun appareil n'est authentifié individuellement et aucun pilote n'est fourni.
 
 ## Protocole des postes v1
 

@@ -175,15 +175,38 @@ function App() {
         </section>
         {session.scenario && <section className="scenario"><div className="section-heading"><div><p className="eyebrow">Mission · version {session.scenario.version}</p><h2>{session.scenario.title}</h2></div><strong>{session.scenario.completed} / {session.scenario.total} actions</strong></div>
           <p>{session.scenario.summary}</p><p><strong>Résultat : {session.scenario.result === 'completed' ? 'Mission accomplie' : session.scenario.result === 'incomplete' ? 'Mission inachevée' : 'En cours'}</strong></p>
+          <div className="mission-progress"><div className="mission-progress-label"><strong>Progression collective</strong><span>{Math.round(session.scenario.completed / session.scenario.total * 100)} %</span></div><progress aria-label="Progression collective de la mission" value={session.scenario.completed} max={session.scenario.total} /></div>
           {session.scenario.stages.map(stage => <details key={stage.id} open={stage.actions.some(action => action.status === 'available')}><summary>{stage.title} · {stage.duration} · {stage.actions.filter(action => action.status === 'completed').length}/{stage.actions.length}</summary><p>{stage.briefing}</p>
             {stage.actions.map(action => <article key={action.id}><h3>{action.title} — {action.status === 'completed' ? 'Validée' : action.status === 'available' ? 'À réaliser' : 'Verrouillée'}</h3><p>{action.instruction}</p>
               {action.status === 'completed' && <p>Validée le {date(action.completedAt)} par {action.actor}.</p>}
               {!!action.attempts && <p>Tentatives incorrectes : {action.attempts}</p>}
               {action.status === 'available' && <><details><summary>Indice</summary><p>{action.hint}</p></details>
-                {session.status === 'running' ? <form onSubmit={e => { e.preventDefault(); void (async () => { setError(''); setMessage(''); try { const result = await api<{ correct: boolean }>(`/api/sessions/${session.id}/scenario/actions/${action.id}`, 'POST', action.requiresAnswer ? { answer: scenarioAnswer } : {}); await refresh(); if (result.correct) { setScenarioAnswer(''); setMessage('Action validée'); } else setError('Réponse incorrecte, réessayez.'); } catch (error) { setError(error instanceof Error ? error.message : 'Action impossible'); } })(); }}>
+                {session.status === 'running' && action.sensor ? <p>En attente du capteur : utilisez le simulateur ci-dessous ou envoyez l’état depuis une intégration.</p> : session.status === 'running' ? <form onSubmit={e => { e.preventDefault(); void (async () => { setError(''); setMessage(''); try { const result = await api<{ correct: boolean }>(`/api/sessions/${session.id}/scenario/actions/${action.id}`, 'POST', action.requiresAnswer ? { answer: scenarioAnswer } : {}); await refresh(); if (result.correct) { setScenarioAnswer(''); setMessage('Action validée'); } else setError('Réponse incorrecte, réessayez.'); } catch (error) { setError(error instanceof Error ? error.message : 'Action impossible'); } })(); }}>
                   {action.requiresAnswer && <label>Réponse<input required maxLength={100} value={scenarioAnswer} onChange={e => setScenarioAnswer(e.target.value)} /></label>}<button>{action.requiresAnswer ? 'Valider la réponse' : 'Confirmer l’action'}</button>
                 </form> : <p>Lancez ou reprenez la session pour valider cette action.</p>}</>}
             </article>)}</details>)}
+          {session.scenario.sensors.length > 0 && <div className="sensor-console">
+            <div className="section-heading"><div><p className="eyebrow">Banc de simulation</p><h2>Capteurs et interactions</h2></div><span className="sensor-count">{session.scenario.sensors.length} capteurs</span></div>
+            <p>Modifiez les états pour simuler les équipements. Seul un changement correspondant à la prochaine action fait avancer la mission ; un état envoyé trop tôt doit être modifié puis réémis. Les équipements réels peuvent envoyer les mêmes événements via l’API.</p>
+            {session.scenario.stages.map(stage => {
+              const sensors = session.scenario!.sensors.filter(sensor => stage.actions.some(action => action.sensor?.id === sensor.id));
+              if (!sensors.length) return null;
+              return <details className="sensor-group" key={stage.id} open={stage.actions.some(action => action.status === 'available')}>
+                <summary>{stage.title} <span>{stage.actions.filter(action => action.status === 'completed').length}/{stage.actions.length}</span></summary>
+                <div className="sensor-grid">{sensors.map(sensor => {
+                  const expected = stage.actions.some(action => action.sensor?.id === sensor.id && action.status === 'available');
+                  return <div className={`sensor-card${expected ? ' is-next' : ''}`} key={sensor.id}>
+                    <div className="sensor-card-heading"><strong>{sensor.name}</strong>{expected && <span>Action attendue</span>}</div>
+                    <p>État : <strong>{sensor.values.find(option => option.value === sensor.state?.value)?.label ?? 'Inconnu'}</strong></p>
+                    {sensor.state && <p className="sensor-source">{date(sensor.state.at)} · {sensor.state.actor}</p>}
+                    <div className="row">{sensor.values.map(option => <button key={option.value} type="button" className={sensor.state?.value === option.value ? 'compact' : 'secondary compact'} aria-pressed={sensor.state?.value === option.value} disabled={session.status !== 'running' || sensor.state?.value === option.value}
+                      onClick={() => { void (async () => { setError(''); setMessage(''); try { const result = await api<{ completed: boolean }>(`/api/sessions/${session.id}/scenario/sensors/${sensor.id}/simulate`, 'POST', { value: option.value }); await refresh(); setMessage(result.completed ? 'Action validée' : 'État enregistré sans progression'); } catch (error) { setError(error instanceof Error ? error.message : 'État impossible à enregistrer'); } })(); }}>{option.label}</button>)}</div>
+                  </div>;
+                })}</div>
+              </details>;
+            })}
+            {session.status !== 'running' && <p>La simulation est disponible lorsque la session est en cours.</p>}
+          </div>}
         </section>}
         <div className="grid"><section><h2>Équipes et classement</h2>{session.teams.length ? <ol className="ranking">{session.teams.map(t => <li key={t.id}><span className="dot" style={{ backgroundColor: t.color }} /> <strong>{t.name}</strong> — {t.score} pts {!t.active && '(retirée)'}
           {teamEditable && !!t.active && <span className="row"><button className="secondary compact" onClick={() => { const name = prompt('Nom de l’équipe', t.name); if (name === null) return; const color = prompt('Couleur au format #RRGGBB', t.color); if (color !== null) void act(() => api(`/api/teams/${t.id}`, 'PUT', { name, color })); }}>Modifier</button><button className="secondary compact" onClick={() => { if (confirm(`Retirer ${t.name} ?`)) void act(() => api(`/api/teams/${t.id}/remove`, 'POST', {})); }}>Retirer</button></span>}</li>)}</ol> : <p>Aucune équipe.</p>}

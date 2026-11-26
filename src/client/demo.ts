@@ -1,6 +1,6 @@
 import { z, ZodError } from 'zod';
 import { stationMessage } from '../shared/protocol.js';
-import { scenarios, newProgress, performScenarioAction, scenarioSummary, scenarioView, type ScenarioDefinition, type ScenarioProgress } from '../shared/scenarios.js';
+import { scenarios, newProgress, performScenarioAction, receiveScenarioSensor, scenarioSummary, scenarioView, type ScenarioDefinition, type ScenarioProgress } from '../shared/scenarios.js';
 
 type Role = 'gm' | 'admin';
 type Event = { id: string; type: string; actor: string; message: string; created_at: string };
@@ -153,6 +153,18 @@ function handle(url: string, method: string, body?: object): unknown {
     const result = performScenarioAction(session.scenarioData.definition, session.scenarioData.progress, scenarioMatch[2], answer, role()!, now());
     event(state, session, result.correct ? 'scenario_action_completed' : 'scenario_answer_incorrect', result.title);
     write(state); return { correct: result.correct };
+  }
+  const sensorMatch = url.match(/^\/api\/sessions\/([^/]+)\/scenario\/sensors\/([^/]+)\/(simulate|messages)$/);
+  if (sensorMatch && method === 'POST') {
+    const session = findSession(state, sensorMatch[1]); mutable(session);
+    if (session.status !== 'running') throw new Error('La session doit être en cours');
+    if (!session.scenarioData) throw new Error('Aucun scénario pour cette session');
+    const { value } = z.object({ value: z.string().min(1).max(100) }).strict().parse(body);
+    const sourceActor = sensorMatch[3] === 'simulate' ? `simulateur (${role()!})` : role()!;
+    const result = receiveScenarioSensor(session.scenarioData.definition, session.scenarioData.progress, sensorMatch[2], value, sourceActor, now());
+    event(state, session, 'scenario_sensor', `${result.sensorName} : ${result.valueLabel}`, sourceActor);
+    if (result.completed) event(state, session, 'scenario_action_completed', result.title!, sourceActor);
+    write(state); return { completed: result.completed };
   }
   const sessionMatch = url.match(/^\/api\/sessions\/([^/]+)(?:\/(transition|reset|teams|scores|events|export))?$/);
   if (sessionMatch) {

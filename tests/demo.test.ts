@@ -18,6 +18,28 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe('démonstration autonome', () => {
+  it('simule une séquence de capteurs et conserve une progression collective', () => {
+    call('/api/login', 'POST', { role: 'gm', password: '' });
+    const config = call<{ id: string }[]>('/api/configurations')[0];
+    const id = call<{ id: string }>('/api/sessions', 'POST', { configurationId: config.id, scenarioId: 'lunar-simulation' }).id;
+    const sensor = (sensorId: string, value: string) => call<{ completed: boolean }>(`/api/sessions/${id}/scenario/sensors/${sensorId}/simulate`, 'POST', { value });
+    expect(() => sensor('inventory', 'active')).toThrow('en cours');
+    call(`/api/sessions/${id}/transition`, 'POST', { action: 'start' });
+    expect(sensor('solar-cable', 'active').completed).toBe(false);
+    expect(sensor('inventory', 'active').completed).toBe(true);
+    expect(sensor('solar-cable', 'active').completed).toBe(false);
+    expect(sensor('solar-cable', 'inactive').completed).toBe(false);
+    expect(sensor('solar-cable', 'active').completed).toBe(true);
+    expect(() => sensor('unknown', 'active')).toThrow('introuvable');
+    const detail = call<{ scenario: { completed: number; sensors: { id: string; state: { actor: string } | null }[] } }>(`/api/sessions/${id}`);
+    expect(detail.scenario.completed).toBe(2);
+    expect(detail.scenario.sensors.find(item => item.id === 'inventory')?.state?.actor).toBe('simulateur (gm)');
+    call(`/api/sessions/${id}/transition`, 'POST', { action: 'pause' });
+    expect(() => sensor('console-cable', 'active')).toThrow('en cours');
+    const next = call<{ id: string }>(`/api/sessions/${id}/reset`, 'POST', {}).id;
+    expect(call<{ scenario: { sensors: { state: unknown }[] } }>(`/api/sessions/${next}`).scenario.sensors.every(item => item.state === null)).toBe(true);
+  });
+
   it('suit les actions du scénario et remet sa progression à zéro', () => {
     call('/api/login', 'POST', { role: 'gm', password: '' });
     const config = call<{ id: string }[]>('/api/configurations')[0];
