@@ -34,4 +34,6 @@ button.compact { padding: .4rem .7rem; }
 .error, .success { padding: .8rem; border-radius: .4rem; }
 .error { background: #ffe7e7; color: #861b1b; }
 .success { background: #e4f6e8; color: #165c27; }
+.demo-notice { background: #fff3cc; color: #4a3500; border: 2px solid #aa7600; border-radius: .6rem; padding: 1rem; margin-bottom: 1rem; }
+.demo-notice p { margin: .4rem 0; }
 @media (max-width: 600px) { header, .session-head { align-items: flex-start; flex-direction: column; } main { padding: .75rem; } }

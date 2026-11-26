@@ -17,6 +17,10 @@ const labels: Record<string, string> = {
   offline: 'Hors ligne', busy: 'Occupé', error: 'En erreur',
 };
 async function api<T>(url: string, method = 'GET', body?: object): Promise<T> {
+  if (__ORBITA_DEMO__) {
+    const { demoApi } = await import('./demo.js');
+    return demoApi(url, method, body) as T;
+  }
   const response = await fetch(url, { method, headers: body ? { 'Content-Type': 'application/json' } : undefined, body: body ? JSON.stringify(body) : undefined, credentials: 'same-origin' });
   if (!response.ok) {
     const data = await response.json().catch(() => ({ error: 'Erreur réseau' })) as { error?: string };
@@ -85,9 +89,14 @@ function App() {
       socket.onclose = () => { if (active) { setConnection('Déconnecté — reconnexion'); retry = setTimeout(connect, 3000); } };
       socket.onerror = () => socket?.close();
     };
-    update(); connect();
+    let unsubscribe: (() => void) | undefined;
+    update();
+    if (__ORBITA_DEMO__) {
+      setConnection('Simulation dans ce navigateur');
+      void import('./demo.js').then(({ subscribeDemo }) => { if (active) unsubscribe = subscribeDemo(update); });
+    } else connect();
     const poll = setInterval(update, 5000);
-    return () => { active = false; clearTimeout(retry); clearInterval(poll); socket?.close(); };
+    return () => { active = false; clearTimeout(retry); clearInterval(poll); unsubscribe?.(); socket?.close(); };
   }, [role, refresh]);
   const act = async (fn: () => Promise<unknown>, success = 'Action enregistrée') => {
     setError(''); setMessage('');
@@ -110,18 +119,27 @@ function App() {
   const startEditing = (config: Config) => {
     setConfigId(config.id); setConfigName(config.name); setDuration(config.duration_seconds); setAllowChanges(!!config.allow_team_changes); setStationNames(config.stations.map(s => s.name).join('\n'));
   };
+  const demoNotice = __ORBITA_DEMO__ && <aside className="demo-notice" aria-label="Mode démonstration"><strong>Démonstration — données fictives, sans serveur</strong><p>Les données restent dans ce navigateur et peuvent être effacées. Ne saisissez aucune information sensible ; ce mode ne protège pas les accès.</p><div className="row"><a href="https://github.com/baptouuuuuu/orbita/issues/new" target="_blank" rel="noreferrer">Donner un retour sur GitHub</a><button type="button" className="secondary compact" onClick={() => { if (confirm('Effacer toutes les données de démonstration de ce navigateur ?')) void import('./demo.js').then(({ resetDemo }) => { resetDemo(); location.reload(); }); }}>Effacer la démonstration</button></div></aside>;
+  const exportDemo = async (id: string) => {
+    try {
+      const data = await api<object>(`/api/sessions/${id}/export`);
+      const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a'); link.href = url; link.download = `orbita-demo-${id}.json`; link.click(); URL.revokeObjectURL(url);
+    } catch (e) { setError(e instanceof Error ? e.message : 'Export impossible'); }
+  };
   if (checking) return <main><p>Chargement…</p></main>;
-  if (!role) return <main className="login"><h1>ORBITA</h1><p>Pilotage local de jeux physiques</p><form onSubmit={submitLogin}>
+  if (!role) return <main className="login">{demoNotice}<h1>ORBITA</h1><p>Pilotage local de jeux physiques</p><form onSubmit={submitLogin}>
     <label>Rôle<select value={loginRole} onChange={e => setLoginRole(e.target.value as Role)}><option value="gm">Maître du jeu</option><option value="admin">Administrateur</option></select></label>
-    <label>Mot de passe<input type="password" autoComplete="current-password" required value={password} onChange={e => setPassword(e.target.value)} /></label>
-    <button>Se connecter</button>{error && <p role="alert" className="error">{error}</p>}
+    {!__ORBITA_DEMO__ && <label>Mot de passe<input type="password" autoComplete="current-password" required value={password} onChange={e => setPassword(e.target.value)} /></label>}
+    <button>{__ORBITA_DEMO__ ? 'Entrer dans la démonstration' : 'Se connecter'}</button>{error && <p role="alert" className="error">{error}</p>}
   </form></main>;
   const active = session && session.status !== 'finished';
   const teamEditable = active && (session.status === 'ready' || !!session.configuration.allow_team_changes);
   const remaining = session ? Math.max(0, session.remaining_ms - (session.status === 'running' ? tick - receivedAt : 0)) : 0;
   return <main>
+    {demoNotice}
     <header><div><h1>ORBITA</h1><p>{role === 'admin' ? 'Administrateur' : 'Maître du jeu'} · Temps réel : <strong>{connection}</strong></p></div>
-      <button className="secondary" onClick={() => act(async () => { await api('/api/logout', 'POST', {}); setRole(null); setSelected(''); setSession(null); })}>Déconnexion</button></header>
+      <button className="secondary" onClick={() => { void api('/api/logout', 'POST', {}).then(() => { setRole(null); setSelected(''); setSession(null); setError(''); setMessage(''); }).catch(e => setError(e instanceof Error ? e.message : 'Déconnexion impossible')); }}>Déconnexion</button></header>
     <nav aria-label="Navigation"><button className={tab === 'game' ? '' : 'secondary'} onClick={() => setTab('game')}>Pilotage</button>{role === 'admin' && <button className={tab === 'admin' ? '' : 'secondary'} onClick={() => setTab('admin')}>Administration</button>}</nav>
     {error && <p role="alert" className="error">{error}</p>}{message && <p role="status" className="success">{message}</p>}
     {tab === 'game' ? <>
@@ -129,9 +147,9 @@ function App() {
         <label>Historique<select value={selected} onChange={e => setSelected(e.target.value)}><option value="">Choisir une session</option>{sessions.map(s => <option key={s.id} value={s.id}>{JSON.parse(s.configuration_snapshot).name} — {labels[s.status]} — {date(s.created_at)}</option>)}</select></label>
         <label>Nouvelle session<select id="new-config" defaultValue=""><option value="" disabled>Choisir une configuration</option>{configs.filter(c => !c.archived).map(c => <option value={c.id} key={c.id}>{c.name}</option>)}</select></label>
         <button onClick={() => { const id = (document.getElementById('new-config') as HTMLSelectElement).value; if (!id) { setError('Choisissez une configuration'); return; } void act(async () => { const result = await api<{ id: string }>('/api/sessions', 'POST', { configurationId: id }); setSelected(result.id); }, 'Session créée'); }}>Créer la session</button>
-      </div>{!sessions.length && <p>Aucune session. Un administrateur doit créer une configuration.</p>}</section>
+      </div>{!sessions.length && <p>{configs.some(c => !c.archived) ? 'Aucune session. Choisissez une configuration pour en créer une.' : 'Aucune session. Un administrateur doit créer une configuration.'}</p>}</section>
       {session ? <>
-        <section><div className="session-head"><div><h2>{session.configuration.name}</h2><p>État : <strong>{labels[session.status]}</strong></p><a href={`/api/sessions/${session.id}/export`}>Exporter les résultats JSON</a></div><div className="timer" aria-label="Temps restant">{clock(remaining)}<small>temps restant{remaining === 0 ? ' — écoulé' : ''}</small></div></div>
+        <section><div className="session-head"><div><h2>{session.configuration.name}</h2><p>État : <strong>{labels[session.status]}</strong></p>{__ORBITA_DEMO__ ? <button className="secondary compact" onClick={() => void exportDemo(session.id)}>Exporter les résultats JSON</button> : <a href={`/api/sessions/${session.id}/export`}>Exporter les résultats JSON</a>}</div><div className="timer" aria-label="Temps restant">{clock(remaining)}<small>temps restant{remaining === 0 ? ' — écoulé' : ''}</small></div></div>
           <div className="row">
             {session.status === 'ready' && <button onClick={() => act(() => api(`/api/sessions/${session.id}/transition`, 'POST', { action: 'start' }))}>Lancer</button>}
             {session.status === 'running' && <button onClick={() => act(() => api(`/api/sessions/${session.id}/transition`, 'POST', { action: 'pause' }))}>Pause</button>}

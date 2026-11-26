@@ -8,6 +8,7 @@
     "dev": "tsx watch src/server/main.ts",
     "dev:ui": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
+    "build:demo": "tsc --noEmit && vite build --mode demo",
     "lint": "eslint .",
     "test": "vitest run",
     "start": "tsx src/server/main.ts"

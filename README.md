@@ -20,6 +20,37 @@ Ouvrir <http://127.0.0.1:3000>. Connectez-vous comme administrateur, créez une 
 
 `.env.example` décrit les variables disponibles : il n'est pas chargé automatiquement. `ORBITA_DB` vaut `./data/orbita.sqlite`, `ORBITA_SILENT_SECONDS` vaut 60, et le port TCP HTTP/WebSocket vaut 3000 par défaut. `npm test`, `npm run lint` et `npm run build` exécutent les contrôles. Les migrations SQL sont appliquées au démarrage et enregistrées dans la base.
 
+## Démonstration GitHub Pages
+
+La démonstration utilise la même interface mais **simule le serveur dans le navigateur** : aucun serveur ORBITA, appareil ou mot de passe n'est nécessaire. Une configuration et deux postes fictifs sont proposés. Choisissez un rôle, créez une session, puis testez les commandes ; le rôle administrateur permet aussi de modifier les configurations. Le bouton « Donner un retour sur GitHub » ouvre une issue à remplir manuellement, sans transmettre automatiquement les données de test.
+
+Les données sont stockées dans le navigateur (`localStorage`), partagées entre ses onglets et effaçables avec « Effacer la démonstration » ; le rôle est conservé dans l'onglet (`sessionStorage`). Elles ne sont ni partagées entre appareils ni garanties permanentes. Ne saisissez pas de données sensibles : cette version n'a aucune authentification réelle, n'est pas un système de production et ne teste pas les connexions matérielles, le serveur, SQLite ou la sécurité réelle. Le diagnostic et les changements temps réel sont simulés ; les accès simultanés peuvent écraser des modifications.
+
+Pour tester le build localement :
+
+```sh
+npm run build:demo
+npx vite preview --mode demo --host 127.0.0.1
+```
+
+Ouvrir l'URL affichée suivie de `/orbita/`. Le workflow `.github/workflows/pages.yml` vérifie chaque push et chaque pull request ; seuls les commits de `main` sont publiés sur le site stable. Pour activer la publication, dans **Settings → Pages**, choisir **GitHub Actions** comme source, et autoriser Actions si nécessaire. L'URL prévue est `https://baptouuuuuu.github.io/orbita/` après le premier déploiement réussi. La disponibilité et la visibilité de Pages pour un dépôt privé dépendent de l'offre et des paramètres GitHub ; ne rendez pas le dépôt public sans avoir vérifié son contenu et choisi sa visibilité. Le lien dans l'interface suppose que les issues du dépôt sont activées et accessibles aux personnes qui font les retours.
+
+Le build normal `npm run build` produit dans `dist/` l'interface réelle avec authentification ; `build:demo` produit séparément `dist-demo/`. Ne déployez jamais `dist-demo/` sur la VM de production.
+
+## Préparation du déploiement VM
+
+Le workflow manuel **Préparer ou déployer la production VM** teste et construit toujours un artefact de production. Il ne contacte une VM que si la variable de dépôt `VM_DEPLOY_ENABLED` vaut explicitement `true` et que le lancement vise `main`. Configurez auparavant l'environnement GitHub `production` et ses approbations/protections ; ne l'activez pas avant d'avoir préparé et testé la VM.
+
+Hypothèses du déploiement fourni : Linux, Node 24 et npm (`/usr/bin/npm` dans le service d'exemple ; adaptez le chemin si nécessaire), `tar`, `flock`, `curl`, `systemd`, accès SSH et accès au registre npm au moment du déploiement. Le serveur écoute `127.0.0.1:3000` ; un proxy HTTPS local et le pare-feu restent à configurer séparément. Préparer sur la VM :
+
+1. Créer l'utilisateur système `orbita` et le répertoire `/var/lib/orbita` accessible en écriture à cet utilisateur. Créer `/opt/orbita/releases` et accorder au compte SSH de déploiement les droits d'écriture sur `/opt/orbita` et `releases` ; les autres utilisateurs ne doivent pas pouvoir modifier les versions.
+2. Installer `deploy/orbita.service` dans `/etc/systemd/system/orbita.service`, puis exécuter `sudo systemctl daemon-reload` et `sudo systemctl enable orbita.service`. Le service utilise `/opt/orbita/current`, mis en place au premier déploiement.
+3. Créer `/etc/orbita/orbita.env`, lisible uniquement par root, avec les deux mots de passe distincts, `ORBITA_DB=/var/lib/orbita/orbita.sqlite`, `ORBITA_HOST=127.0.0.1`, `ORBITA_PORT=3000` et `ORBITA_ORIGIN` correspondant exactement à l'URL HTTPS du proxy. Ne stockez pas ce fichier dans GitHub.
+4. Autoriser le compte de déploiement à exécuter sans mot de passe **uniquement** `systemctl restart orbita.service` et `systemctl stop orbita.service` via sudo ; vérifiez les chemins absolus sur la VM. Restreindre sa clé SSH et son accès réseau.
+5. Dans GitHub, définir les variables `VM_HOST`, `VM_USER` et `VM_PORT`, ainsi que les secrets `VM_SSH_PRIVATE_KEY` et `VM_KNOWN_HOSTS`. La clé d'hôte doit être vérifiée par un canal indépendant avant son ajout à `VM_KNOWN_HOSTS` ; le workflow refuse les hôtes non reconnus.
+
+Le workflow transfère l'artefact, installe les dépendances de production, bascule le lien `current`, redémarre le service et vérifie son état et la page HTTP locale. En cas d'échec, il tente de rétablir le lien précédent. Il ne restaure **pas** la base : sauvegardez-la avant toute mise à jour et vérifiez la compatibilité des migrations avant un retour arrière. Une version dont le répertoire existe déjà n'est pas écrasée ; après un échec, examinez-la avant de la retirer manuellement. Aucun déploiement VM n'a lieu à chaque commit ni sans activation explicite.
+
 ## Tablette et sécurité réseau
 
 Par défaut le serveur écoute **uniquement sur 127.0.0.1**. Pour une tablette, choisissez une adresse IP LAN fixe pour la machine, isolez le réseau avec un pare-feu, puis configurez par exemple :

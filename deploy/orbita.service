@@ -1,0 +1,22 @@
+[Unit]
+Description=ORBITA local game server
+After=network.target
+
+[Service]
+Type=simple
+User=orbita
+Group=orbita
+WorkingDirectory=/opt/orbita/current
+EnvironmentFile=/etc/orbita/orbita.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/npm start
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/orbita
+
+[Install]
+WantedBy=multi-user.target

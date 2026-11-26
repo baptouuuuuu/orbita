@@ -1,0 +1,91 @@
+name: Préparer ou déployer la production VM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-vm
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+      - name: Préparer le paquet serveur
+        run: tar -czf orbita-production.tgz package.json package-lock.json src/server src/shared migrations dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: orbita-production-${{ github.sha }}
+          path: orbita-production.tgz
+          retention-days: 7
+
+  deploy:
+    if: vars.VM_DEPLOY_ENABLED == 'true' && github.ref == 'refs/heads/main'
+    needs: package
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: orbita-production-${{ github.sha }}
+      - name: Configurer SSH avec clé d'hôte épinglée
+        env:
+          SSH_KEY: ${{ secrets.VM_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.VM_KNOWN_HOSTS }}
+        run: |
+          set -eu
+          test -n "$SSH_KEY" && test -n "$SSH_KNOWN_HOSTS"
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/orbita_deploy
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/orbita_deploy ~/.ssh/known_hosts
+      - name: Déployer la version vérifiée
+        env:
+          VM_HOST: ${{ vars.VM_HOST }}
+          VM_USER: ${{ vars.VM_USER }}
+          VM_PORT: ${{ vars.VM_PORT }}
+          RELEASE_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$VM_HOST" =~ ^[a-zA-Z0-9._-]+$ && "$VM_USER" =~ ^[a-z_][a-z0-9_-]*$ && "$VM_PORT" =~ ^[0-9]{1,5}$ && "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          (( 10#$VM_PORT >= 1 && 10#$VM_PORT <= 65535 ))
+          scp -i ~/.ssh/orbita_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -P "$VM_PORT" orbita-production.tgz "$VM_USER@$VM_HOST:/opt/orbita/orbita-$RELEASE_SHA.tgz"
+          ssh -i ~/.ssh/orbita_deploy -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -p "$VM_PORT" "$VM_USER@$VM_HOST" "bash -s -- '$RELEASE_SHA'" <<'REMOTE'
+          set -euo pipefail
+          sha=$1
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          root=/opt/orbita
+          exec 9>"$root/.deploy.lock"
+          flock -x 9
+          release="$root/releases/$sha"
+          archive="$root/orbita-$sha.tgz"
+          test ! -e "$release"
+          test ! -e "$root/current" || test -L "$root/current"
+          mkdir "$release"
+          tar -xzf "$archive" -C "$release"
+          cd "$release"
+          npm ci --omit=dev
+          old=$(readlink "$root/current" || true)
+          ln -sfn "$release" "$root/current"
+          if sudo -n systemctl restart orbita.service && sleep 3 && systemctl is-active --quiet orbita.service && curl -fsS --max-time 5 http://127.0.0.1:3000/ >/dev/null; then
+            rm -f "$archive"
+            echo "Version $sha déployée."
+          else
+            if [ -n "$old" ]; then ln -sfn "$old" "$root/current"; sudo -n systemctl restart orbita.service || true; else sudo -n systemctl stop orbita.service || true; rm -f "$root/current"; fi
+            echo "Échec du démarrage : lien précédent restauré si disponible." >&2
+            exit 1
+          fi
+          REMOTE
