@@ -28,6 +28,56 @@ afterEach(async () => {
 });
 
 describe('pilotage local', () => {
+  it('joue et conserve une mission complète, ses erreurs et sa réinitialisation', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'orbita-scenario-')); dirs.push(dir);
+    const path = join(dir, 'test.sqlite');
+    let app = await setup(path);
+    const admin = await login(app, 'admin'); let gm = await login(app, 'gm');
+    const config = (await call(app, admin, 'POST', '/api/admin/configurations', { name: 'Lune', durationSeconds: 3600, allowTeamChanges: true, stations: ['Panneaux', 'Antenne'] })).json().id;
+    const catalog = (await call(app, gm, 'GET', '/api/scenarios')).json();
+    expect(catalog[0].id).toBe('lunar-relay');
+    expect(catalog[0].stages).toHaveLength(7);
+    expect(catalog[0].stages[0].actions[0].title).toBe('Inventorier et installer');
+    expect(JSON.stringify(catalog)).not.toContain('"answer"');
+    expect((await call(app, gm, 'POST', '/api/sessions', { configurationId: config, scenarioId: 'inconnu' })).statusCode).toBe(404);
+    const id = (await call(app, gm, 'POST', '/api/sessions', { configurationId: config, scenarioId: 'lunar-relay' })).json().id;
+    const action = (actionId: string, answer?: string) => call(app, gm, 'POST', `/api/sessions/${id}/scenario/actions/${actionId}`, answer === undefined ? {} : { answer });
+    expect((await action('inventory')).statusCode).toBe(409);
+    await call(app, gm, 'POST', `/api/sessions/${id}/transition`, { action: 'start' });
+    expect((await action('cabling')).statusCode).toBe(409);
+    expect((await action('inventory')).json()).toEqual({ correct: true });
+    expect((await action('inventory')).statusCode).toBe(409);
+    expect((await action('cabling')).json().correct).toBe(true);
+    expect((await action('safety', '8')).json().correct).toBe(false);
+    await call(app, gm, 'POST', `/api/sessions/${id}/transition`, { action: 'pause' });
+    expect((await action('safety', '9')).statusCode).toBe(409);
+    await app.close(); apps.splice(apps.indexOf(app), 1);
+    app = await setup(path); gm = await login(app, 'gm');
+    let detail = (await call(app, gm, 'GET', `/api/sessions/${id}`)).json();
+    expect(detail.scenario.completed).toBe(2);
+    expect(detail.scenario.stages[0].actions[2].attempts).toBe(1);
+    expect(JSON.stringify(detail.scenario)).not.toContain('"answer"');
+    await call(app, gm, 'POST', `/api/sessions/${id}/transition`, { action: 'resume' });
+    const actions: [string, string?][] = [
+      ['safety', '9'], ['solar-angle', '60'], ['solar-balance', '30'], ['power-check'],
+      ['boot-order', '123'], ['clock', '14:32'], ['diagnostic'], ['lunar-azimuth', '125'], ['lunar-elevation', '32'], ['lunar-lock'],
+      ['earth-target', 'b'], ['relay-turn', '60'], ['relay-confirm'], ['channel', '13'], ['encrypt', 'OXQH'], ['transmit-check'],
+      ['decrypt', 'SALUT'], ['checksum', '10'], ['final'],
+    ];
+    for (const [actionId, answer] of actions) expect((await action(actionId, answer)).json()).toEqual({ correct: true });
+    detail = (await call(app, gm, 'GET', `/api/sessions/${id}/export`)).json();
+    expect(detail.scenario.result).toBe('completed');
+    expect(detail.scenario.completed).toBe(21);
+    expect(detail.events.some((event: { type: string }) => event.type === 'scenario_answer_incorrect')).toBe(true);
+    const next = (await call(app, gm, 'POST', `/api/sessions/${id}/reset`, {})).json().id;
+    expect((await call(app, gm, 'GET', `/api/sessions/${id}`)).json().scenario.result).toBe('completed');
+    detail = (await call(app, gm, 'GET', `/api/sessions/${next}`)).json();
+    expect(detail.scenario.completed).toBe(0);
+    expect(detail.scenario.version).toBe(1);
+    await call(app, gm, 'POST', `/api/sessions/${next}/transition`, { action: 'finish' });
+    expect((await call(app, gm, 'GET', `/api/sessions/${next}`)).json().scenario.result).toBe('incomplete');
+  });
+
   it('conserve transitions, scores, compensation et résultats après redémarrage', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'orbita-test-')); dirs.push(dir);
     const path = join(dir, 'test.sqlite');
@@ -58,6 +108,11 @@ describe('pilotage local', () => {
     expect(detail.teams[0].score).toBe(0);
     const stationId = detail.stations[0].id;
     expect((await call(app, gm, 'POST', `/api/stations/${stationId}/simulate`, { version: 2, type: 'status', status: 'ready' })).statusCode).toBe(400);
+    expect((await call(app, gm, 'POST', `/api/stations/${stationId}/messages`, { version: 1, type: 'status', status: 'busy', message: 'Tension stable' })).statusCode).toBe(200);
+    detail = (await call(app, gm, 'GET', `/api/sessions/${id}`)).json();
+    expect(detail.stations[0].effective_status).toBe('busy');
+    expect(detail.stations[0].last_message).toBe('Tension stable');
+    expect(detail.events.some((event: { actor: string; type: string }) => event.actor === 'gm' && event.type === 'station_busy')).toBe(true);
     for (const status of ['ready', 'error', 'offline']) {
       expect((await call(app, gm, 'POST', `/api/stations/${stationId}/simulate`, { version: 1, type: 'status', status })).statusCode).toBe(200);
       detail = (await call(app, gm, 'GET', `/api/sessions/${id}`)).json();

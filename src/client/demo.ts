@@ -1,5 +1,6 @@
 import { z, ZodError } from 'zod';
 import { stationMessage } from '../shared/protocol.js';
+import { scenarios, newProgress, performScenarioAction, scenarioSummary, scenarioView, type ScenarioDefinition, type ScenarioProgress } from '../shared/scenarios.js';
 
 type Role = 'gm' | 'admin';
 type Event = { id: string; type: string; actor: string; message: string; created_at: string };
@@ -7,7 +8,7 @@ type Config = { id: string; name: string; duration_seconds: number; allow_team_c
 type Team = { id: string; name: string; color: string; active: number };
 type Score = { id: string; team_id: string; delta: number; reason: string; actor: string; created_at: string; compensates: string | null };
 type Station = { id: string; name: string; status: string; last_seen: string | null; last_message: string | null };
-type Session = { id: string; status: 'ready' | 'running' | 'paused' | 'finished'; configuration: Config; created_at: string; finished_at: string | null; elapsed_ms: number; started_at: string | null; teams: Team[]; stations: Station[]; scores: Score[]; events: Event[] };
+type Session = { id: string; status: 'ready' | 'running' | 'paused' | 'finished'; configuration: Config; created_at: string; finished_at: string | null; elapsed_ms: number; started_at: string | null; teams: Team[]; stations: Station[]; scores: Score[]; events: Event[]; scenarioData?: { definition: ScenarioDefinition; progress: ScenarioProgress } };
 type State = { configs: Config[]; sessions: Session[]; events: Event[]; startedAt: string };
 
 const key = 'orbita-demo-v1';
@@ -58,8 +59,9 @@ function elapsed(session: Session) {
 }
 function detail(session: Session) {
   const elapsed_ms = elapsed(session);
+  const { scenarioData, ...rest } = session;
   return {
-    ...session, configuration_snapshot: JSON.stringify(session.configuration), elapsed_ms,
+    ...rest, scenario: scenarioData ? scenarioView(scenarioData.definition, scenarioData.progress, session.status) : null, configuration_snapshot: JSON.stringify(session.configuration), elapsed_ms,
     remaining_ms: Math.max(0, session.configuration.duration_seconds * 1000 - elapsed_ms),
     teams: session.teams.map(t => ({ ...t, score: session.scores.filter(s => s.team_id === t.id).reduce((sum, s) => sum + s.delta, 0) })).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)),
     stations: session.stations.map(s => ({ ...s, effective_status: s.status !== 'offline' && (!s.last_seen || Date.now() - Date.parse(s.last_seen) > 60000) ? 'offline' : s.status })),
@@ -111,6 +113,7 @@ function handle(url: string, method: string, body?: object): unknown {
   if (url === '/api/logout' && method === 'POST') { sessionStorage.removeItem(roleKey); return { ok: true }; }
   if (url.startsWith('/api/admin/') && role() !== 'admin') throw new Error('Accès administrateur requis');
   if (url === '/api/configurations' && method === 'GET') return state.configs;
+  if (url === '/api/scenarios' && method === 'GET') return scenarios.map(scenarioSummary);
   if (url === '/api/admin/health' && method === 'GET') return { backend: 'simulé', database: 'stockage du navigateur', startedAt: state.startedAt, silentSeconds: 60, events: state.events.slice(0, 100) };
   if (url === '/api/sessions' && method === 'GET') return state.sessions.map(s => ({ id: s.id, status: s.status, created_at: s.created_at, finished_at: s.finished_at, configuration_snapshot: JSON.stringify(s.configuration) }));
   if (url === '/api/admin/configurations' && method === 'POST') {
@@ -131,11 +134,25 @@ function handle(url: string, method: string, body?: object): unknown {
     }
   }
   if (url === '/api/sessions' && method === 'POST') {
-    const { configurationId } = z.object({ configurationId: z.uuid() }).strict().parse(body);
+    const { configurationId, scenarioId } = z.object({ configurationId: z.uuid(), scenarioId: z.string().min(1).max(100).optional() }).strict().parse(body);
     const config = state.configs.find(c => c.id === configurationId && !c.archived);
     if (!config) throw new Error('Configuration indisponible');
     if (state.sessions.some(s => s.status !== 'finished')) throw new Error('Une session est déjà active');
-    const session = newSession(config); state.sessions.unshift(session); event(state, session, 'session_created', 'Session créée'); write(state); return { id: session.id };
+    const scenario = scenarioId ? scenarios.find(item => item.id === scenarioId) : undefined;
+    if (scenarioId && !scenario) throw new Error('Scénario introuvable');
+    const session = newSession(config);
+    if (scenario) session.scenarioData = { definition: structuredClone(scenario), progress: newProgress() };
+    state.sessions.unshift(session); event(state, session, 'session_created', 'Session créée'); write(state); return { id: session.id };
+  }
+  const scenarioMatch = url.match(/^\/api\/sessions\/([^/]+)\/scenario\/actions\/([^/]+)$/);
+  if (scenarioMatch && method === 'POST') {
+    const session = findSession(state, scenarioMatch[1]); mutable(session);
+    if (session.status !== 'running') throw new Error('La session doit être en cours');
+    if (!session.scenarioData) throw new Error('Aucun scénario pour cette session');
+    const { answer } = z.object({ answer: z.string().max(100).optional() }).strict().parse(body);
+    const result = performScenarioAction(session.scenarioData.definition, session.scenarioData.progress, scenarioMatch[2], answer, role()!, now());
+    event(state, session, result.correct ? 'scenario_action_completed' : 'scenario_answer_incorrect', result.title);
+    write(state); return { correct: result.correct };
   }
   const sessionMatch = url.match(/^\/api\/sessions\/([^/]+)(?:\/(transition|reset|teams|scores|events|export))?$/);
   if (sessionMatch) {
@@ -159,6 +176,7 @@ function handle(url: string, method: string, body?: object): unknown {
       session.elapsed_ms = elapsed(session); session.started_at = null; session.status = 'finished'; session.finished_at = now();
       event(state, session, 'session_reset', 'Session clôturée par réinitialisation');
       const next = newSession(session.configuration); next.teams = session.teams.filter(t => t.active).map(t => ({ ...t, id: id() }));
+      if (session.scenarioData) next.scenarioData = { definition: structuredClone(session.scenarioData.definition), progress: newProgress() };
       state.sessions.unshift(next); event(state, next, 'session_created', 'Session créée par réinitialisation'); write(state); return { id: next.id };
     }
     if (action === 'teams') {
@@ -198,14 +216,14 @@ function handle(url: string, method: string, body?: object): unknown {
     session.scores.unshift({ id: id(), team_id: original.team_id, delta: -original.delta, reason, actor: role()!, created_at: now(), compensates: original.id });
     event(state, session, 'score_compensated', `${original.id} : ${reason}`); write(state); return { ok: true };
   }
-  const stationMatch = url.match(/^\/api\/stations\/([^/]+)\/simulate$/);
+  const stationMatch = url.match(/^\/api\/stations\/([^/]+)\/(simulate|messages)$/);
   if (stationMatch && method === 'POST') {
     const { session, station } = sessionWithStation(state, stationMatch[1]); mutable(session);
     const input = stationMessage.parse(body);
     if (input.type === 'event' && station.status === 'offline') throw new Error('Poste hors ligne');
     if (input.type === 'status') station.status = input.status;
     station.last_seen = now(); station.last_message = input.message ?? null;
-    event(state, session, input.type === 'status' ? `station_${input.status}` : 'station_event', `${station.id} : ${input.message ?? (input.type === 'status' ? input.status : '')}`, 'simulateur');
+    event(state, session, input.type === 'status' ? `station_${input.status}` : 'station_event', `${station.id} : ${input.message ?? (input.type === 'status' ? input.status : '')}`, stationMatch[2] === 'simulate' ? 'simulateur' : role()!);
     write(state); return { ok: true };
   }
   throw new Error('Requête inconnue en mode démonstration');
